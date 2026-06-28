@@ -10,6 +10,8 @@ Stages (reported via progress_cb):
 """
 
 from __future__ import annotations
+import threading
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -67,14 +69,31 @@ def analyze_episode(
             progress_cb(0.02)
         duration_sec = _get_duration(video_path)
 
-        # Stage 2: cut detection
+        # Stage 2: cut detection (PySceneDetect has no progress callback, so we
+        # trickle the bar forward on a side thread so the UI doesn't appear frozen)
         if progress_cb:
             progress_cb(0.05)
+
+        _cut_done = threading.Event()
+        if progress_cb:
+            _t0 = time.time()
+            # Conservative estimate keeps the bar well below 55% so it never
+            # overshoots before detection finishes — the snap to 0.55 will be small.
+            _est_sec = max(5.0, duration_sec / 10.0)
+
+            def _trickle() -> None:
+                while not _cut_done.wait(timeout=0.35):
+                    frac = min(0.90, (time.time() - _t0) / _est_sec)
+                    progress_cb(0.05 + frac * 0.48)
+
+            threading.Thread(target=_trickle, daemon=True).start()
+
         shot_metrics, pacing_metrics = compute_cut_metrics(
             video_path,
             threshold=cfg["cut_detection_threshold"],
             duration_sec=duration_sec,
         )
+        _cut_done.set()
 
         # Stage 3: frame sampling (color / motion / flashing)
         if progress_cb:
