@@ -1,0 +1,57 @@
+# Build output
+dist/
+build/
+*.spec.bak
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# FFmpeg binaries (distributed separately in GitHub Release)
+ffmpeg.exe
+ffprobe.exe
+
+# Analysis cache and database (user's personal data, not part of the app)
+.analysis/
+
+# Video files
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.wmv
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+test_report.pdf
+
+# Scratch / dev files
+gui_live.py
+Test.pyt
+*.parts
+
+# Media companion files (subtitle, metadata, etc.)
+*.srt
+*.nfo
+*.jpg
+*.png
+*.nfo
+
+# Editor/OS junk
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+desktop.ini
+.DS_Store
