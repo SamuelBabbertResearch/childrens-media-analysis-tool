@@ -196,7 +196,7 @@ _EP_SORT_COLS = {
     "show_name", "file_name", "duration_sec", "cuts_per_min",
     "color_saturation_mean", "color_contrast_mean", "motion_mean",
     "flashing_events_per_min", "audio_rms_mean",
-    "sensory_load_score", "analyzed_at",
+    "sensory_load_score", "analyzed_at", "notes",
 }
 _SHOW_SORT_COLS = {
     "show_name", "episode_count", "avg_load",
