@@ -133,8 +133,8 @@ All findings are correlational. CMAT describes the stimulus; it does not predict
 **Requirements:** Python 3.11+, FFmpeg on PATH
 
 ```bash
-git clone https://github.com/SamuelBabbertResearch/childrens-media-analysis-tool.git
-cd childrens-media-analysis-tool
+git clone https://github.com/SamuelBabbertResearch/childrens-media-analysis-toolkit.git
+cd childrens-media-analysis-toolkit
 pip install -r requirements.txt
 python gui.py
 ```
