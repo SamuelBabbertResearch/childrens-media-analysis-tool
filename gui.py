@@ -172,6 +172,27 @@ class App(tk.Tk):
                                      command=self._watch_live, state=tk.DISABLED,
                                      fg="navy")
         self._btn_watch.pack(fill=tk.X, pady=2)
+        self._btn_full_series = tk.Button(btn_frame, text="Full Series Aggregate",
+                                           command=self._show_full_series_aggregate,
+                                           state=tk.DISABLED, fg="#5500aa")
+        self._btn_full_series.pack(fill=tk.X, pady=2)
+        self._btn_sample_agg = tk.Button(btn_frame, text="View Sample Aggregate...",
+                                          command=self._load_sample_results,
+                                          fg="#884400")
+        self._btn_sample_agg.pack(fill=tk.X, pady=2)
+        _WidgetTooltip(
+            self._btn_sample_agg,
+            "Load a saved sampling manifest (manifest.json) to see the aggregate "
+            "sensory profile for only the episodes that sample selected.\n\n"
+            "Use this to run stabilization tests: sample at n=2, n=3, n=4, etc., "
+            "analyze each set, then load each manifest here to compare the aggregates. "
+            "The scores are computed in isolation — only the sampled episodes count, "
+            "regardless of what else is in the index.\n\n"
+            "Browse to the manifest.json file in your sample output folder "
+            "(e.g. Little_Bear_spread_2026-06-30/). The episodes CSV is found "
+            "automatically.",
+            wraplength=300,
+        )
 
         ttk.Separator(btn_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(6, 4))
         self._btn_pin = tk.Button(btn_frame, text="Pin for Compare",
@@ -288,6 +309,7 @@ class App(tk.Tk):
             self._root_folder = Path(folder)
             self._folder_var.set(str(self._root_folder))
             self._populate_tree()
+            self._btn_full_series.config(state=tk.NORMAL)
             if list_top_level(self._root_folder):
                 self._write_txt("Choose a show or episode in the library to see results.\n\n"
                                 "Cached results load instantly; new episodes need to be analyzed.")
@@ -419,6 +441,152 @@ class App(tk.Tk):
         else:
             agg = compute_show_aggregate(skey, ok_results)
             self._render_show(agg, ok_results, total_eps=len(episodes))
+
+    def _load_sample_results(self) -> None:
+        if not self._root_folder:
+            messagebox.showwarning(
+                "No root folder",
+                "Choose a root folder first so CMAT knows where to find the cache.",
+                parent=self,
+            )
+            return
+        manifest_path = filedialog.askopenfilename(
+            title="Open sample manifest",
+            filetypes=[("Manifest JSON", "manifest.json"), ("JSON files", "*.json"),
+                       ("All files", "*.*")],
+        )
+        if not manifest_path:
+            return
+
+        import json as _json
+        import pandas as _pd
+
+        manifest_path = Path(manifest_path)
+        try:
+            manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            messagebox.showerror("Read error", f"Could not read manifest:\n{exc}", parent=self)
+            return
+
+        csv_path = manifest_path.parent / "selected.csv"
+        if not csv_path.exists():
+            # Fall back to any CSV in the same folder
+            candidates = list(manifest_path.parent.glob("*.csv"))
+            if len(candidates) == 1:
+                csv_path = candidates[0]
+            elif len(candidates) > 1:
+                chosen = filedialog.askopenfilename(
+                    title="Select the episodes CSV for this sample",
+                    initialdir=str(manifest_path.parent),
+                    filetypes=[("CSV files", "*.csv")],
+                )
+                if not chosen:
+                    return
+                csv_path = Path(chosen)
+            else:
+                messagebox.showerror(
+                    "Missing CSV",
+                    f"No CSV file found beside the manifest in:\n{manifest_path.parent}",
+                    parent=self,
+                )
+                return
+
+        try:
+            df = _pd.read_csv(csv_path)
+        except Exception as exc:
+            messagebox.showerror("Read error", f"Could not read selected.csv:\n{exc}", parent=self)
+            return
+
+        if "filepath" not in df.columns:
+            messagebox.showerror(
+                "Missing column",
+                "selected.csv has no 'filepath' column — cannot locate cached results.",
+                parent=self,
+            )
+            return
+
+        analysis_root = self._root_folder / ".analysis"
+
+        def _find_cached(fp: Path) -> dict | None:
+            # Primary: derive show_key from the filepath relative to root
+            try:
+                skey = show_key(self._root_folder, fp.parent)
+                result = load_cached(self._root_folder, skey, fp.stem)
+                if result:
+                    return result
+            except ValueError:
+                pass
+            # Fallback: search all .analysis/ subdirectories for the stem
+            if analysis_root.exists():
+                for candidate in analysis_root.rglob(f"{fp.stem}.json"):
+                    try:
+                        import json as _json2
+                        return _json2.loads(candidate.read_text(encoding="utf-8"))
+                    except Exception:
+                        pass
+            return None
+
+        ok_results: list[EpisodeResult] = []
+        missing: list[str] = []
+        for fp_str in df["filepath"]:
+            if not fp_str or str(fp_str) == "nan":
+                continue
+            fp = Path(str(fp_str))
+            cached = _find_cached(fp)
+            if cached:
+                ok_results.append(rescore_episode(EpisodeResult.from_dict(cached), self._cfg))
+            else:
+                missing.append(fp.name)
+
+        entry_id = manifest.get("entry_id", manifest_path.parent.name)
+        total_selected = manifest.get("total_selected", len(df))
+
+        if not ok_results:
+            self._write_txt(
+                f"Sample: {entry_id}\n\n"
+                "No cached results found for any episode in this sample.\n\n"
+                "Analyze the episodes first, then reload the sample manifest."
+            )
+            return
+
+        if missing:
+            messagebox.showwarning(
+                "Some episodes not cached",
+                f"{len(missing)} episode(s) not found in the cache and were skipped:\n"
+                + "\n".join(f"  • {n}" for n in missing[:10])
+                + ("\n  …" if len(missing) > 10 else ""),
+                parent=self,
+            )
+
+        agg = compute_show_aggregate(entry_id, ok_results)
+        self._render_show(agg, ok_results, total_eps=total_selected,
+                          sample_info=manifest)
+
+    def _show_full_series_aggregate(self) -> None:
+        if not self._root_folder:
+            return
+        all_shows = list_shows(self._root_folder)
+        ok_results = []
+        total_eps = 0
+        for show_dir in all_shows:
+            skey = show_key(self._root_folder, show_dir)
+            episodes = list_episodes(show_dir)
+            total_eps += len(episodes)
+            for ep in episodes:
+                c = load_cached(self._root_folder, skey, ep.stem)
+                if c:
+                    ok_results.append(rescore_episode(EpisodeResult.from_dict(c), self._cfg))
+
+        series_name = self._root_folder.name
+        if not ok_results:
+            self._write_txt(
+                f"Full Series: {series_name}\n\n"
+                f"{total_eps} episode(s) across {len(all_shows)} season(s) — none analyzed yet.\n\n"
+                "Analyze some episodes first, then click Full Series Aggregate."
+            )
+            return
+        agg = compute_show_aggregate(series_name, ok_results)
+        self._render_show(agg, ok_results, total_eps=total_eps)
 
     # -----------------------------------------------------------------------
     # Result rendering
@@ -584,7 +752,7 @@ class App(tk.Tk):
         self._btn_save_note.config(state=tk.NORMAL)
 
     def _render_show(self, agg: ShowAggregate, results: list[EpisodeResult],
-                     total_eps: int) -> None:
+                     total_eps: int, sample_info: dict | None = None) -> None:
         self._current_ep_result = None
         self._current_show_results = [r for r in results if r.status == "ok"]
         self._btn_chart.config(state=tk.DISABLED)  # chart is episode-only for now
@@ -606,6 +774,29 @@ class App(tk.Tk):
                  f"{analyzed} of {total_eps} episode(s) analyzed"
                  + (f"  |  {agg.failed_count} failed" if agg.failed_count else "")
                  + "\n\n", "dim")
+
+        if sample_info:
+            t.insert(tk.END, "Sample design\n", "h2")
+            method      = sample_info.get("method", "?")
+            stratify    = sample_info.get("stratify_by") or "none"
+            params      = sample_info.get("params", {})
+            seed        = sample_info.get("seed", "?")
+            probability = sample_info.get("probability", True)
+            generated   = sample_info.get("generated_at_utc", "")[:10]
+            per_n       = params.get("per_stratum_n", "?")
+            alloc       = sample_info.get("allocation") or "—"
+            t.insert(tk.END,
+                     f"  Method: {method}   Stratification: {stratify}   "
+                     f"Allocation: {alloc}   n/stratum: {per_n}   "
+                     f"Seed: {seed}   Generated: {generated}\n", "mono")
+            if not probability:
+                t.insert(tk.END,
+                         "  ⚠  Non-probability sample (manual selection) — "
+                         "no external-validity claim.\n", "err")
+            notes = sample_info.get("notes", [])
+            for note in notes:
+                t.insert(tk.END, f"  • {note}\n", "dim")
+            t.insert(tk.END, "\n")
 
         t.insert(tk.END, "Aggregate across episodes\n", "h2")
         t.insert(tk.END, "  Each episode weighted equally regardless of length.\n", "dim")
@@ -1359,13 +1550,13 @@ class App(tk.Tk):
                     r["show_name"],
                     r["file_name"],
                     _fmt(r["duration_sec"], "%.0f"),
+                    _fmt(r["sensory_load_score"], "%.3f"),
                     _fmt(r["cuts_per_min"], "%.1f"),
                     _fmt(r["color_saturation_mean"], "%.3f"),
                     _fmt(r["color_contrast_mean"], "%.3f") if r.get("color_contrast_mean") is not None else "",
                     _fmt(r["motion_mean"], "%.3f"),
                     _fmt(r["flashing_events_per_min"], "%.1f") if r["flashing_events_per_min"] is not None else "",
                     _fmt(r["audio_rms_mean"], "%.4f") if r["audio_rms_mean"] is not None else "n/a",
-                    _fmt(r["sensory_load_score"], "%.3f"),
                     r["analyzed_at"] or "",
                     note_disp,
                 ),
