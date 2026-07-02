@@ -57,7 +57,9 @@ def _sync_manifest() -> None:
     ]
 
     # Folder names that are not real shows (containers, test runs, etc.)
-    _SKIP = {"Shows", "Lectures", "Overstimulation"}
+    _SKIP = {"Shows", "Lectures", "Overstimulation", "Jordan Peterson",
+             "Little Bear", "My Neighbor Totoro", "Ghibili",
+             "Season 1", "Season 2", "Season 3", "Season 4", "Season 5"}
 
     def _has_episode_json(d: Path) -> bool:
         return (d / "aggregate.json").exists() or any(
@@ -266,6 +268,7 @@ def _badge(score: float | None) -> str:
 _NAV = [
     ("Home",          "",             "home"),
     ("Browse shows",  "/shows/",      "shows"),
+    ("For Parents",   "/for-parents/","for-parents"),
     ("Methodology",   "/methodology/","methodology"),
     ("The tool",      "/tool/",       "tool"),
     ("Download data", "/download/",   "download"),
@@ -656,6 +659,30 @@ _METHODOLOGY = """<h1>Methodology</h1>
 
 <h2>Sensory load composite</h2>
 <p>The sensory load score is a weighted sum of normalized sub-metrics. Normalization uses fixed reference ranges — not per-corpus normalization — so scores remain comparable across separate analysis runs and future additions to the index. The "General / All Ages" preset weights are used for all index entries. Full weight and normalization configurations are available in the <a href="https://github.com/SamuelBabbertResearch/childrens-media-analysis-toolkit">CMAT repository</a>.</p>
+
+<h2>Language metrics</h2>
+<p>When closed-caption or subtitle files are available for an episode, CMAT extracts three language complexity measures from the dialogue text. These numbers describe how the show uses language — not how well children will understand it. Comprehension depends on the individual child's age, vocabulary, and language experience.</p>
+<table>
+<thead><tr><th>Metric</th><th>What it measures</th><th>How to read it</th></tr></thead>
+<tbody>
+<tr>
+  <td><strong>Mean WPM</strong><br><small>(Words Per Minute)</small></td>
+  <td>How quickly dialogue is spoken, averaged across the episode. Calculated from the timing information in the subtitle file.</td>
+  <td>Lower numbers mean slower, more deliberate speech. A typical children's show falls in the 80–120&nbsp;WPM range; adult conversation is typically 130–160&nbsp;WPM. <em>Example: 95.7&nbsp;WPM is a relaxed, easy-to-follow pace.</em></td>
+</tr>
+<tr>
+  <td><strong>Mean TTR</strong><br><small>(Type-Token Ratio)</small></td>
+  <td>Vocabulary variety — the ratio of unique words (types) to total words spoken (tokens). Computed per episode then averaged.</td>
+  <td>A TTR of 1.0 would mean every word is different; a TTR near 0 means the same words repeat constantly. Children's shows typically range from 0.20 to 0.45. <em>Example: a TTR of 0.277 indicates moderate repetition — new words appear regularly alongside familiar core vocabulary.</em></td>
+</tr>
+<tr>
+  <td><strong>Mean Lexical Density</strong></td>
+  <td>The share of content words — nouns, verbs, adjectives, adverbs — out of all words spoken. Function words ("the," "is," "and") are not counted.</td>
+  <td>Higher density means more information packed into each sentence. Simple conversational speech sits around 0.40–0.50; information-rich narration can reach 0.65+. <em>Example: a lexical density of 0.585 means roughly 3 in every 5 words carry direct meaning — moderately dense for children's content.</em></td>
+</tr>
+</tbody>
+</table>
+<p>Language metrics require a subtitle or caption file (.srt or .vtt) for each episode. Episodes without captions show "Not available" for these fields. The metrics are derived from the caption text, which may differ slightly from the audio (simplified captioning, timing gaps, etc.).</p>
 
 <h2>Flashing detection note</h2>
 <p>The flashing metric measures whole-frame mean luminance change between sampled frames at 2 fps, with a detection ceiling of 1 transition per second. The medically relevant range for photosensitive epilepsy screening is 3–50 Hz. <strong>This metric is not a photosensitive epilepsy screen.</strong> A score of zero does not indicate safety; a non-zero score indicates detectable whole-frame brightness transitions useful for relative comparison across shows.</p>
@@ -1137,13 +1164,98 @@ def _clear_site(path: Path) -> None:
             child.unlink()
 
 
+def _build_for_parents(shows_data: list[tuple]) -> str:
+    """Build the For Parents page — calmest episodes ranked by sensory load score."""
+
+    # Collect every episode from children's shows only
+    rows: list[dict] = []
+    for entry, agg in shows_data:
+        if entry.get("category") != "children":
+            continue
+        show_key_val = entry["show_key"]
+        display      = entry["display_name"]
+        slug         = slugify(display)
+        for ep in _find_episodes(show_key_val):
+            score = ep.get("metrics", {}).get("sensory_load", {}).get("score")
+            if score is None:
+                continue
+            # Derive a clean episode title from the filename
+            stem = ep.get("file", "")
+            stem = re.sub(r"\.(mp4|mkv|avi|mov)$", "", stem, flags=re.IGNORECASE)
+            rows.append({
+                "show":    display,
+                "show_url": _p(f"/shows/{slug}/"),
+                "title":   stem,
+                "score":   score,
+            })
+
+    rows.sort(key=lambda r: r["score"])
+    top = rows[:50]  # show top 50 calmest
+
+    if not top:
+        table = "<p>No episode data available yet.</p>"
+    else:
+        def _row(i: int, r: dict) -> str:
+            b = _badge(r["score"])
+            show_link = f'<a href="{r["show_url"]}">{r["show"]}</a>'
+            title = r["title"]
+            if len(title) > 70:
+                title = title[:69] + "…"
+            return (
+                f'<tr>'
+                f'<td style="text-align:center;color:#888">{i}</td>'
+                f'<td>{show_link}</td>'
+                f'<td>{title}</td>'
+                f'<td class="score-cell" data-val="{r["score"]:.4f}">{b}</td>'
+                f'</tr>'
+            )
+
+        thead = (
+            '<thead><tr>'
+            '<th style="width:2.5em">#</th>'
+            '<th data-col="show">Show</th>'
+            '<th data-col="title">Episode</th>'
+            '<th data-col="score">Sensory Load</th>'
+            '</tr></thead>'
+        )
+        tbody = "\n".join(_row(i + 1, r) for i, r in enumerate(top))
+        table = f'<table id="calm-table" class="idx-table">{thead}<tbody>{tbody}</tbody></table>'
+
+    return f"""
+<h1>For Parents — Calmest Episodes</h1>
+<p style="max-width:680px;line-height:1.6">
+  The table below ranks the <strong>50 lowest-sensory-load episodes</strong> observed across
+  all children's shows in the dataset, scored under the
+  <em>General&nbsp;/&nbsp;All&nbsp;Ages</em> preset. Lower scores reflect slower pacing,
+  less motion, lower color saturation, fewer flashing events, and quieter audio.
+  These are structural features of the video — not a recommendation or safety rating.
+  Individual children respond differently based on age, temperament, and viewing history.
+</p>
+<p style="font-size:0.85em;color:#555;max-width:680px">
+  <strong>Score key:</strong>
+  <span class="badge badge-lo">0.00–0.32</span> lower load &nbsp;
+  <span class="badge badge-md">0.33–0.39</span> moderate &nbsp;
+  <span class="badge badge-hi">0.40+</span> higher load
+</p>
+{table}
+<p style="margin-top:2rem;font-size:0.82em;color:#666;max-width:640px">
+  Scores are produced by the
+  <a href="{TOOL_URL}">Children's Media Analysis Toolkit (CMAT)</a> and reflect a
+  spread sample of episodes analyzed under consistent settings (seed&nbsp;42,
+  sample_fps&nbsp;=&nbsp;2). Baseline shows (YouTube creators, adult animation) are
+  excluded from this view. See <a href="{_p('/methodology/')}">Methodology</a> for
+  full metric definitions.
+</p>
+"""
+
+
 def build() -> None:
     _sync_manifest()
 
     if SITE.exists():
         _clear_site(SITE)
     SITE.mkdir(parents=True, exist_ok=True)
-    for sub in ("shows", "static", "data", "methodology", "tool", "download"):
+    for sub in ("shows", "static", "data", "methodology", "tool", "download", "for-parents"):
         (SITE / sub).mkdir(exist_ok=True)
 
     (SITE / "static" / "style.css").write_text(CSS, encoding="utf-8")
@@ -1196,6 +1308,12 @@ def build() -> None:
             csv_src = ROOT / ".analysis" / entry["show_key"] / "aggregate.csv"
             if csv_src.exists():
                 shutil.copy(csv_src, data_dir / "aggregate.csv")
+
+    # For Parents
+    (SITE / "for-parents" / "index.html").write_text(
+        _page("For Parents", _build_for_parents(shows_data), active="for-parents"),
+        encoding="utf-8",
+    )
 
     # Methodology / tool / download
     (SITE / "methodology" / "index.html").write_text(

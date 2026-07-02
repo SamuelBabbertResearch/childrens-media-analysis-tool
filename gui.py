@@ -1188,7 +1188,11 @@ class App(tk.Tk):
             )
 
     def _transcribe_show_subtitles(self) -> None:
-        """Queue Whisper transcription for analyzed episodes that have no subtitle file."""
+        """Queue Whisper transcription for all episodes that have no subtitle file.
+
+        Uses cached duration when available; falls back to reading the video
+        header with OpenCV for episodes that haven't been analyzed yet.
+        """
         kind, path = self._selected_item()
         if kind != "show":
             return
@@ -1197,14 +1201,23 @@ class App(tk.Tk):
 
         items: list[tuple[Path, float]] = []
         for ep in list_episodes(show_dir):
-            # Only episodes that have already been analyzed
-            cached = load_cached(self._root_folder, skey, ep.stem)
-            if not cached or cached.get("status") != "ok":
-                continue
             # Skip if subtitle file already exists
             if _find_cc_file(ep) is not None:
                 continue
-            duration_sec = cached.get("duration_sec", 0.0)
+            cached = load_cached(self._root_folder, skey, ep.stem)
+            if cached and cached.get("status") == "ok":
+                duration_sec = cached.get("duration_sec", 0.0)
+            else:
+                # Not yet analyzed — read duration from the video header
+                try:
+                    import cv2 as _cv2
+                    cap = _cv2.VideoCapture(str(ep))
+                    fps = cap.get(_cv2.CAP_PROP_FPS) or 1.0
+                    frames = cap.get(_cv2.CAP_PROP_FRAME_COUNT)
+                    cap.release()
+                    duration_sec = frames / fps
+                except Exception:
+                    duration_sec = 0.0
             items.append((ep, duration_sec))
 
         if not items:
@@ -1222,7 +1235,12 @@ class App(tk.Tk):
         threading.Thread(target=self._worker_transcribe, daemon=True).start()
 
     def _worker_transcribe(self) -> None:
-        """Background thread: transcribe each queued episode in order."""
+        """Background thread: transcribe each queued episode in order.
+
+        After a successful transcription the cached episode JSON is updated with
+        the new speech metrics so the results panel and Language tab reflect the
+        new data without requiring a full re-analysis.
+        """
         while self._srt_queue:
             ep_path, duration_sec = self._srt_queue.pop(0)
             remaining = len(self._srt_queue)
@@ -1231,6 +1249,21 @@ class App(tk.Tk):
                 "s": f"Transcribing {ep_path.name}  ({remaining} remaining after this)…",
             })
             result = transcribe_only(ep_path, duration_sec, self._cfg)
+
+            # Patch the cache so the new speech data is immediately visible
+            if result.available and self._root_folder:
+                skey = show_key(self._root_folder, ep_path.parent)
+                cached = load_cached(self._root_folder, skey, ep_path.stem)
+                if cached:
+                    cached.setdefault("metrics", {})["speech"] = {
+                        "available":      True,
+                        "source":         result.source,
+                        "words_per_minute": result.words_per_minute,
+                        "speech_density": result.speech_density,
+                        "total_words":    result.total_words,
+                    }
+                    save_cache(self._root_folder, skey, ep_path.stem, cached)
+
             self._queue.put({
                 "t": "srt_ep_done",
                 "ep_path": ep_path,
@@ -2660,8 +2693,28 @@ class App(tk.Tk):
                 try:
                     result = EpisodeResult.from_dict(c)
                     sp = result.metrics.speech
+
+                    # If the cache says no speech, check whether an SRT/VTT
+                    # exists on disk now (e.g. added after the episode was first
+                    # analyzed). If found, read it and update the cache entry.
+                    if not sp.available:
+                        cc = _find_cc_file(ep)
+                        if cc is not None:
+                            from analyzer.speech import _parse_cc
+                            sp = _parse_cc(cc, c.get("duration_sec", 0.0))
+                            if sp.available:
+                                c.setdefault("metrics", {})["speech"] = {
+                                    "available":        True,
+                                    "source":           sp.source,
+                                    "words_per_minute": sp.words_per_minute,
+                                    "speech_density":   sp.speech_density,
+                                    "total_words":      sp.total_words,
+                                }
+                                save_cache(self._root_folder, skey, ep.stem, c)
+
                     if not sp.available:
                         continue
+
                     air_date = ""
                     if self._db_conn:
                         meta = get_episode_metadata(self._db_conn, str(ep))
@@ -3857,7 +3910,18 @@ class CompareWindow(tk.Toplevel):
             row("Avg RMS loudness", va, vb, fmt=".4f")
 
 
+def _ensure_shows_folder() -> None:
+    import sys
+    if getattr(sys, "frozen", False):
+        base = Path(sys.executable).parent
+    else:
+        base = Path(__file__).parent
+    shows = base / "Shows"
+    shows.mkdir(exist_ok=True)
+
+
 def main() -> None:
+    _ensure_shows_folder()
     app = App()
     app.mainloop()
 
